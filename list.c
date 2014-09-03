@@ -53,7 +53,7 @@ draw_bar(list_t *l)
 }
 
 void
-draw_items(list_t *l)
+draw_items(list_t *l, const int *pre)
 {
   int i;
   int max;
@@ -66,7 +66,7 @@ draw_items(list_t *l)
     max = nb_items_per_page;
   for (i = 0; i != max; i++)
     {
-      fprintf(l->f_out, "%d - %s", i==9?0:i+1, l->items[l->cur_item + i].s);
+      fprintf(l->f_out, "%c - %s", pre[i], l->items[l->cur_item + i].s);
       nbw = l->items[l->cur_item + i].colsneed;
       if (nbw < l->count_charw[i])
 	fprintf(l->f_out, "%0*c", l->count_charw[i] - nbw, ' ');

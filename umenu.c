@@ -104,6 +104,30 @@ init_locale()
 }
 
 int
+has_c(int c, const int *clist)
+{
+  int i;
+
+  for (i = 0; clist[i] != 0 && clist[i] != c; i++);
+
+  if (clist[i] == 0)
+    return -1;
+
+  return i;
+}
+
+void
+usage()
+{
+  fprintf(stderr, "USAGE: umenu [-r -o -l] item1 item2...\n\
+\t-r : select file descriptor to display selected item (by default 2)\n\
+\t-o : select file descriptor to display list (by default 1)\n\
+\t-l : select nb item per page (by default 10)\n\
+EXAMPLE: echo response $(umenu -r1 -o2 -l3 yes no \"why not\")\n");
+  exit(1);
+}
+
+int
 main(int ac, char **av)
 {
   int c;
@@ -112,6 +136,15 @@ main(int ac, char **av)
   int i;
   int count_items;
   char **items;
+  int shortcut[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'a', 'b',
+		    'c', 'd', 'e', 'f', 'g', 'h', 'i', 'k', 'l', 'm', 'n', 'o',
+		    'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', 0};
+  int shortcut_len = sizeof shortcut / sizeof(int);
+  int l_num;
+  int nb_items_per_page = 10;
+
+  if (ac == 1)
+    usage();
 
   fd_result = STDERR_FILENO;
   init_locale();
@@ -125,6 +158,9 @@ main(int ac, char **av)
     else if (av[i][1] == 'o') {
       l.f_out = fdopen(atoi(av[i]+2), "w");
     }
+    else if (av[i][1] == 'l') {
+      nb_items_per_page = atoi(av[i]+2);
+    }
     ++i;
   }
 
@@ -133,7 +169,9 @@ main(int ac, char **av)
   if (count_items == 0)
     return (1);
 
-  set_nb_items_per_page(&l, 10);
+  if (nb_items_per_page <= 0 || nb_items_per_page >= shortcut_len)
+    return 1;
+  set_nb_items_per_page(&l, nb_items_per_page);
   set_items(&l, items, count_items);
 
   tcgetattr( STDIN_FILENO, &oldt );
@@ -143,24 +181,22 @@ main(int ac, char **av)
   terminit();
 
   /* fd_in = STDIN_FILENO */
-  draw_items(&l);
+  draw_items(&l, shortcut);
   draw_bar(&l);
   fflush(l.f_out);
   while ((c = getchar()) != 'q')
     {
       if (c == 'n' || c == ' ' || c == 'j')
-	curseek(&l, 10);
+	curseek(&l, nb_items_per_page);
       else if (c == 'p')
-	curseek(&l, -10);
-      else if (c >= '0' && c <= '9')
+	curseek(&l, -nb_items_per_page);
+      else if ((l_num = has_c(c, shortcut)) >= 0)
 	{
-	  if (c == '0')
-	    c = '9'+1; /* car 0 == 10 et pas 0 */
-	  select_item(c-'0'-1 + l.cur_item);
+	  select_item(l_num + l.cur_item);
 	  break;
 	}
       cursor_top(&l, upstr);
-      draw_items(&l);
+      draw_items(&l, shortcut);
       draw_bar(&l);
       fflush(l.f_out);
     }
