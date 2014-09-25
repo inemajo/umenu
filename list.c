@@ -35,7 +35,9 @@ curseek(list_t *l, int nb)
     l->cur_item += nb;
 }
 
-void
+
+
+int
 draw_bar(list_t *l)
 {
   int cur_p;
@@ -49,7 +51,7 @@ draw_bar(list_t *l)
   nb_p = l->nb_items / nb_items_per_page;
   if (l->nb_items % nb_items_per_page)
     ++nb_p;
-  fprintf(l->f_out, "Page %d/%d", cur_p+1, nb_p);
+  return fprintf(l->f_out, "Page %d/%d", cur_p+1, nb_p);
 }
 
 void
@@ -64,10 +66,11 @@ draw_items(list_t *l, const int *pre)
     max = l->nb_items - l->cur_item;
   else
     max = nb_items_per_page;
-  for (i = 0; i != max; i++)
+  for (i = 0; i < max; i++)
     {
-      fprintf(l->f_out, "%c - %s", pre[i], l->items[l->cur_item + i].s);
-      nbw = l->items[l->cur_item + i].colsneed;
+      nbw = fprintf(l->f_out, "%c - ", pre[i]);
+      fprintf(l->f_out, "%s", l->items[l->cur_item + i].s);
+      nbw += l->items[l->cur_item + i].colsneed;
       if (nbw < l->count_charw[i])
 	fprintf(l->f_out, "%0*c", l->count_charw[i] - nbw, ' ');
       l->count_charw[i] = nbw;
@@ -75,8 +78,14 @@ draw_items(list_t *l, const int *pre)
       fprintf(l->f_out, "\n");
     }
   while (i < nb_items_per_page) {
-    fprintf(l->f_out, "    %0*c\n", l->count_charw[i], ' ');
+    fprintf(l->f_out, "%0*c\n", l->count_charw[i], ' ');
     ++i;
+  }
+  l->last_drawitems_lines = i-1;
+  nbw = draw_bar(l);
+  if (i < l->nb_items_per_page && nbw < l->count_charw[i]) {
+    fprintf(l->f_out, "%0*c", l->count_charw[i] - nbw, ' ');
+    l->count_charw[i] = nbw;
   }
 }
 
@@ -87,10 +96,20 @@ cursor_top(list_t *l, const char *upstr)
   int nb_items_per_page = l->nb_items > l->nb_items_per_page ? l->nb_items_per_page : l->nb_items;
 
   fprintf(l->f_out, "\r");
-  t = nb_items_per_page;
-  while (t--) {
-      fprintf(l->f_out, "%s", upstr);
+  fprintf(l->f_out, "%s", upstr); /* bar  */
+
+  t = l->last_drawitems_lines;
+  while (t > nb_items_per_page) {
+    fprintf(l->f_out, "%0*c%s\r", l->count_charw[t], ' ', upstr);
+    l->count_charw[t] = 0;
+    --t;
   }
+  while (t--)
+      fprintf(l->f_out, "%s", upstr);
+  /* t = l->last_drawitems_lines; */
+  /* while (t-- > nb_items_per_page) { */
+  /*   fprintf(l->f_out, "          ...  \r\n"); */
+  /* } */
 
   fflush(l->f_out);
   /* fprintf(l->f_out, "%0*s\r", l->nb_items_per_page, upstr); */
@@ -99,17 +118,13 @@ cursor_top(list_t *l, const char *upstr)
 void
 set_nb_items_per_page(list_t *l, size_t nb)
 {
-  int diff;
 
   l->count_charw = realloc(l->count_charw, sizeof(size_t) * nb);
-
-  if (nb > l->nb_items_per_page) {
-    diff = nb - l->nb_items_per_page;
-    while (diff--)
-      l->count_charw[l->nb_items_per_page + diff] = 0;
-  }
-
-  l->nb_items_per_page = nb;
+  while (l->nb_items_per_page < nb)
+    {
+      l->count_charw[l->nb_items_per_page] = 0;
+      ++l->nb_items_per_page;
+    }
 }
 
 size_t
@@ -125,7 +140,6 @@ add_item(list_t *l, char *s)
     l->items = realloc(l->items, l->alloc_items * sizeof(item_t));
   }
 
-  /* strdup ?? */
   l->items[item_n].s = s;
 
   ws = calloc(strlen(s)+1, sizeof(wchar_t));
@@ -160,12 +174,30 @@ remove_item(list_t *l, size_t item)
 }
 
 void
+clear_items(list_t *l)
+{
+  while (l->nb_items)
+    remove_item(l, 0);
+}
+
+
+size_t
+copy_items(list_t *dst, list_t *src)
+{
+  size_t i;
+
+  clear_items(dst);
+  for (i = 0; i < src->nb_items; i++) {
+    add_item(dst, src->items[i].s);
+  }
+}
+
+void
 set_items(list_t *l, char **items, size_t nb_items)
 {
   size_t i;
   
-  while (l->nb_items)
-    remove_item(l, 0);
+  clear_items(l);
   for (i = 0; i != nb_items; i++)
     add_item(l, items[i]);
 }

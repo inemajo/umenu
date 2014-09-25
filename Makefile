@@ -3,9 +3,9 @@
 OBJ	= umenu.o \
 	  list.o
 
-LIBS	= -lcurses
+LIBS	= -lcurses -lreadline
 
-CFLAGS	= -O2
+CFLAGS	= -g -ansi -pedantic #-O2
 
 NAME	= umenu
 

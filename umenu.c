@@ -14,6 +14,7 @@
 
 #include "list.h"
 static list_t l = {0};
+static list_t def = {0};
 
 #ifdef unix
 static char termbuf[2048];
@@ -116,6 +117,44 @@ has_c(int c, const int *clist)
   return i;
 }
 
+
+#include <stdio.h>
+#include <readline/readline.h>
+#include <readline/history.h>
+void
+search()
+{
+  char *result;
+  size_t i;
+
+  fprintf(l.f_out, "\r");
+  fflush(l.f_out);
+  result = readline("Search? ");
+  /* the spaces corresponding to strlen("Search? ") */
+  fprintf(l.f_out, "%s        %0*c", upstr, strlen(result), ' '); /* bar  */
+  if (strlen(result) == 0) {
+    copy_items(&l, &def);
+    return ;
+  }
+
+  /* cursor_top(&l, upstr); */
+  clear_items(&l);
+  i = 0;
+  while (i < def.nb_items)
+    {
+      if (strcasestr(def.items[i].s, result) != NULL)
+	add_item(&l, def.items[i].s);
+      i++;
+  }
+  if (l.nb_items == 0) {
+    i = fprintf(l.f_out, "\r\"%s\" Not found!", result);
+    fflush(l.f_out);
+    fprintf(l.f_out, "\r%0*c", i, ' ');
+    copy_items(&l, &def);
+    sleep(1);
+  }
+}
+
 void
 usage()
 {
@@ -173,6 +212,8 @@ main(int ac, char **av)
     return 1;
   set_nb_items_per_page(&l, nb_items_per_page);
   set_items(&l, items, count_items);
+  set_nb_items_per_page(&def, nb_items_per_page);
+  set_items(&def, items, count_items);
 
   tcgetattr( STDIN_FILENO, &oldt );
   newt = oldt;
@@ -182,13 +223,18 @@ main(int ac, char **av)
 
   /* fd_in = STDIN_FILENO */
   draw_items(&l, shortcut);
-  draw_bar(&l);
   fflush(l.f_out);
   while ((c = getchar()) != 'q')
     {
+      if (c == '/') {
+	tcsetattr( STDIN_FILENO, TCSANOW, &oldt);
+	search();
+	l.cur_item = 0;
+	tcsetattr( STDIN_FILENO, TCSANOW, &newt);
+      }
       if (c == 'n' || c == ' ' || c == 'j')
 	curseek(&l, nb_items_per_page);
-      else if (c == 'p')
+      else if (c == 'p' || c == 'k')
 	curseek(&l, -nb_items_per_page);
       else if ((l_num = has_c(c, shortcut)) >= 0)
 	{
@@ -197,7 +243,6 @@ main(int ac, char **av)
 	}
       cursor_top(&l, upstr);
       draw_items(&l, shortcut);
-      draw_bar(&l);
       fflush(l.f_out);
     }
   tcsetattr( STDIN_FILENO, TCSANOW, &oldt);

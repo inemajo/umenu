@@ -23,6 +23,7 @@ typedef struct
   size_t alloc_items;
   size_t cur_item;
   size_t nb_items_per_page;
+  size_t last_drawitems_lines;
 } list_t;
 
 #endif
