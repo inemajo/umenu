@@ -48,7 +48,7 @@ s_col_len(const char *s)
 */
 
 void
-select_item(int item)
+enter_result(int item)
 {
   int len;
 
@@ -109,12 +109,12 @@ has_c(int c, const int *clist)
 {
   int i;
 
-  for (i = 0; clist[i] != 0 && clist[i] != c; i++);
+  for (i = 0; i < l.items_per_page && clist[i] != 0 && clist[i] != c ; i++);
 
-  if (clist[i] == 0)
-    return -1;
+  if (clist[i] == c)
+    return i;
 
-  return i;
+  return -1;
 }
 
 
@@ -127,6 +127,7 @@ search()
   char *result;
   size_t i;
 
+  special(&l);
   fprintf(l.f_out, "\r");
   fflush(l.f_out);
   result = readline("Search? ");
@@ -156,13 +157,42 @@ search()
 }
 
 void
+enter_selected_items()
+{
+  int len;
+  size_t item;
+  int first = 1;
+
+  fprintf(l.f_out, "\n");
+  fflush(l.f_out);
+
+  for (item = 0; item != l.nb_items; item++)
+    {
+      if (l.items[item].selected)
+	{
+	  if (!first)
+	    (void)write(fd_result, " ", 1);
+	  else
+	    first = 0;
+	  (void)write(fd_result, l.items[item].s, l.items[item].len);
+      }
+    }
+}
+
+void
 usage()
 {
   fprintf(stderr, "USAGE: umenu [-r -o -l] item1 item2...\n\
-\t-r : select file descriptor to display selected item (by default 2)\n\
-\t-o : select file descriptor to display list (by default 1)\n\
-\t-l : select nb item per page (by default 10)\n\
-EXAMPLE: echo response $(umenu -r1 -o2 -l3 yes no \"why not\")\n");
+\t-rXX : when XX is the number, select file descriptor to display selected item (by default 2)\n\
+\t-oXX : when XX is the number, select file descriptor to display list (by default 1)\n\
+\t-lXX : when XX is the number, select nb item per page (by default 10)\n\
+EXAMPLE: echo response $(umenu -r1 -o2 -l3 yes no \"why not\")\n\
+Keyboard shortcut are:\n\
+j-k : move up/down cursor\n\
+p-n : move up/down page\n\
+space : select item\n\
+enter : write selected items\n\
+1,2,3... : write item corresponding\n");
   exit(1);
 }
 
@@ -181,6 +211,7 @@ main(int ac, char **av)
   int shortcut_len = sizeof shortcut / sizeof(int);
   int l_num;
   int nb_items_per_page = 10;
+  int mode = 0;
 
   if (ac == 1)
     usage();
@@ -188,11 +219,11 @@ main(int ac, char **av)
   fd_result = STDERR_FILENO;
   init_locale();
 
-  l.f_out = stdout;  
+  l.f_out = stdout;
   i = 1;
   while (i < ac && av[i][0] == '-') {
     if (av[i][1] == 'r') {
-      fd_result = atoi(av[i]+2);
+	fd_result = atoi(av[i]+2);
     }
     else if (av[i][1] == 'o') {
       l.f_out = fdopen(atoi(av[i]+2), "w");
@@ -210,9 +241,9 @@ main(int ac, char **av)
 
   if (nb_items_per_page <= 0 || nb_items_per_page >= shortcut_len)
     return 1;
-  set_nb_items_per_page(&l, nb_items_per_page);
+  set_items_per_page(&l, nb_items_per_page);
   set_items(&l, items, count_items);
-  set_nb_items_per_page(&def, nb_items_per_page);
+  set_items_per_page(&def, nb_items_per_page);
   set_items(&def, items, count_items);
 
   tcgetattr( STDIN_FILENO, &oldt );
@@ -222,35 +253,71 @@ main(int ac, char **av)
   terminit();
 
   /* fd_in = STDIN_FILENO */
-  draw_items(&l, shortcut);
+  l.prefix = shortcut;
+  l.upstr = upstr;
+  l.bottom_msg[0] = '\0';
+  l.bottom_msg_col_s = 0;
+  l.y = 0;
+  l.cursor_y = 0;
+  l.item_top_page = 0;
+  draw_items(&l);
   fflush(l.f_out);
   while ((c = getchar()) != 'q')
     {
-      if (c == '/') {
-	tcsetattr( STDIN_FILENO, TCSANOW, &oldt);
-	search();
-	l.cur_item = 0;
-	tcsetattr( STDIN_FILENO, TCSANOW, &newt);
+
+      if (c == '\n') {
+	enter_selected_items(&l);
+	break;
       }
-      if (c == 'n' || c == ' ' || c == 'j')
-	curseek(&l, nb_items_per_page);
-      else if (c == 'p' || c == 'k')
-	curseek(&l, -nb_items_per_page);
-      else if ((l_num = has_c(c, shortcut)) >= 0)
-	{
-	  select_item(l_num + l.cur_item);
+      else if ((l_num = has_c(c, shortcut)) >= 0) {
+	  enter_result(l_num + l.item_top_page);
 	  break;
 	}
-      cursor_top(&l, upstr);
-      draw_items(&l, shortcut);
-      fflush(l.f_out);
+      else
+	{
+	  switch (c)
+	    {
+	    case '/':
+	      tcsetattr( STDIN_FILENO, TCSANOW, &oldt);
+	      search();
+	      l.cur_page = 0;
+	      l.cursor_y = 0;
+	      draw_items(&l);
+	      tcsetattr( STDIN_FILENO, TCSANOW, &newt);
+	      break;
+	      
+	    case 'n' /*|| ' ' || 'j' */:
+	      page_seek(&l, RELATIVE, 1);
+	      break;
+	    case 'p' /*|| 'k'*/:
+	      page_seek(&l, RELATIVE, -1);
+	      break;
+	    case 'j':
+	      cursor_seek(&l, 1, 1);
+	      break;
+	    case 'k':
+	      cursor_seek(&l, 1, -1);
+	      break;
+	    case ' ':
+	      select_item(&l, l.cursor_y);
+	      cursor_seek(&l, RELATIVE, 1);
+	      /* draw_line(&l, l.cursor_y); */
+	      break;
+	    case 27: /*'ESCAPE'*/
+	      mode = !mode;
+	      set_bottom_msg(&l, "MODE:%d", mode);
+	    default:
+	      break;
+	    }
+	  fflush(l.f_out);
+	}
     }
   tcsetattr( STDIN_FILENO, TCSANOW, &oldt);
 
   while (l.nb_items)
     remove_item(&l, l.nb_items-1);
   free(l.items);
-  free(l.count_charw);
+  free(l.nb_colsw);
   _exit(0);
   return 0;
 }
