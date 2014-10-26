@@ -1,7 +1,10 @@
+#define  _POSIX_SOURCE
 #include <stdlib.h>
 #include <termcap.h>
+#include <stdio.h>
 
 #include <term.h>
+#include <sys/ioctl.h>
 
 #include <errno.h>
 #include <termios.h>
@@ -12,9 +15,17 @@
 #include <wchar.h>
 #include <string.h>
 
+#include <signal.h>
+
 #include "list.h"
 static list_t l = {0};
-static list_t def = {0};
+static item_t **saved_items = NULL;
+static size_t saved_items_len = 0;
+
+static int nb_items_per_page = 10;
+static char *separator = "\n";
+static struct termios oldt, newt;
+static struct winsize winsz;
 
 #ifdef unix
 static char termbuf[2048];
@@ -26,26 +37,24 @@ static char *bp;
 static char *upstr;
 static char *mrstr;
 static char *mestr;
+static char *clstr;
+static char *dcstr;
 
+static int fd_in = STDIN_FILENO;
+static FILE *f_result;
 
-static int fd_in;
-/* static FILE *f_out; */
-static int fd_result;
-
-/* size_t
-s_col_len(const char *s)
+void
+cleanup_exit(int i)
 {
-  size_t len;
-  wchar_t *ws;
+  while (l.nb_items)
+    remove_item(&l, l.nb_items-1);
+  free(l.items);
+  free(l.nb_colsw);
 
-  ws = calloc(strlen(s), sizeof(wchar_t));
-  len = mbstowcs(ws, s, strlen(s));
-  len = wcswidth(ws, len);
-  free(ws);
-  return len;
-  //return mbstowcs(NULL, s, 0) + 1;
+  tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+  _exit(i);
 }
-*/
+
 
 void
 enter_result(int item)
@@ -56,8 +65,11 @@ enter_result(int item)
     return ;
   fprintf(l.f_out, "\n");
   fflush(l.f_out);
+  fclose(l.f_out);
 
-  (void)write(fd_result, l.items[item].s, l.items[item].len);
+  fprintf(f_result, "%s", l.items[item]->s);
+  fflush(f_result);
+  fclose(f_result);
 }
 
 int
@@ -86,6 +98,8 @@ terminit()
   upstr = tgetstr("up", &bp);
   mrstr = tgetstr("mr", &bp);
   mestr = tgetstr("me", &bp);
+  clstr = tgetstr("cl", &bp);
+  dcstr = tgetstr("dc", &bp);
 }
 
 int
@@ -131,76 +145,153 @@ search()
   fprintf(l.f_out, "\r");
   fflush(l.f_out);
   result = readline("Search? ");
+
   /* the spaces corresponding to strlen("Search? ") */
   fprintf(l.f_out, "%s        %0*c", upstr, strlen(result), ' '); /* bar  */
-  if (strlen(result) == 0) {
-    copy_items(&l, &def);
-    return ;
-  }
-
-  /* cursor_top(&l, upstr); */
-  clear_items(&l);
-  i = 0;
-  while (i < def.nb_items)
+  if (saved_items_len)
     {
-      if (strcasestr(def.items[i].s, result) != NULL)
-	add_item(&l, def.items[i].s);
-      i++;
-  }
-  if (l.nb_items == 0) {
-    i = fprintf(l.f_out, "\r\"%s\" Not found!", result);
-    fflush(l.f_out);
-    fprintf(l.f_out, "\r%0*c", i, ' ');
-    copy_items(&l, &def);
-    sleep(1);
-  }
+      memcpy(l.items, saved_items, sizeof(item_t *) * saved_items_len);
+      l.nb_items = saved_items_len;
+    }
+  if (strlen(result) == 0)
+    return ;
+
+  if (saved_items_len != l.nb_items)
+    saved_items = realloc(saved_items, sizeof(item_t *) * l.nb_items);
+  memcpy(saved_items, l.items, sizeof(item_t *) * l.nb_items);
+  saved_items_len = l.nb_items;
+  l.nb_items = 0;
+
+  i = 0;
+  while (i < saved_items_len)
+    {
+      if (strcasestr(saved_items[i]->s, result) != 0)
+	add_item(&l, saved_items[i]);
+      ++i;
+    }
+  free(result);
 }
 
 void
 enter_selected_items()
 {
-  int len;
   size_t item;
   int first = 1;
 
   fprintf(l.f_out, "\n");
   fflush(l.f_out);
-
   for (item = 0; item != l.nb_items; item++)
     {
-      if (l.items[item].selected)
+      if (l.items[item]->selected)
 	{
-	  if (!first)
-	    (void)write(fd_result, " ", 1);
-	  else
+	  if (first)
 	    first = 0;
-	  (void)write(fd_result, l.items[item].s, l.items[item].len);
-      }
+	  else
+	    fprintf(f_result, "%s", separator);
+	  
+	  fprintf(f_result, "%s", l.items[item]->s);
+	}
     }
+  fflush(f_result);
+  fclose(f_result);
 }
 
 void
 usage()
 {
-  fprintf(stderr, "USAGE: umenu [-r -o -l] item1 item2...\n\
-\t-rXX : when XX is the number, select file descriptor to display selected item (by default 2)\n\
-\t-oXX : when XX is the number, select file descriptor to display list (by default 1)\n\
-\t-lXX : when XX is the number, select nb item per page (by default 10)\n\
-EXAMPLE: echo response $(umenu -r1 -o2 -l3 yes no \"why not\")\n\
-Keyboard shortcut are:\n\
-j-k : move up/down cursor\n\
-p-n : move up/down page\n\
-space : select item\n\
-enter : write selected items\n\
-1,2,3... : write item corresponding\n");
+  fprintf(stderr,
+"usage: umenu [-r :result_file | result_fd ] [-o output_fd] [-l item_per_line]\n"
+"             [-s multiple_selection_separator] item1 item2 ...\n"
+"EXAMPLE: echo response $(umenu -r1 -o2 -l3 yes no \"why not\")\n"
+"EXAMPLE: umenu -r :/tmp/result 'cow' 'super cow'\n"
+"Keyboard shortcut:\n"
+"j-k : move up/down cursor\n"
+"p-n : move up/down page\n"
+"space : select item\n"
+"enter : write selected items\n"
+"1,2,3... : write item corresponding\n");
   exit(1);
+}
+
+int
+get_options(int ac, char **av)
+{
+  extern char *optarg;
+  extern int optind;
+  int opt;
+
+  while ((opt = getopt(ac, av, "r:o:l:s:")) != -1) {
+    switch (opt) {
+    case 'r':
+      if (optarg[0] == ':')
+	f_result = fopen(optarg+1, "w");
+      else
+	f_result = fdopen(atoi(optarg), "w");
+      if (!f_result) {
+	perror("Error in -r option");
+	_exit(1);
+      }
+      break;
+    case 'o':
+      l.f_out = fdopen(atoi(optarg), "w");
+      if (!l.f_out) {
+	perror("Error in -o option");
+	_exit(1);
+      }      
+      break;
+    case 'l':
+      nb_items_per_page = atoi(optarg);
+      ioctl(STDOUT_FILENO, TIOCGWINSZ, &winsz);
+      if (nb_items_per_page > winsz.ws_row)
+	nb_items_per_page = winsz.ws_row - 1;
+      break;
+    case 's':
+      separator = optarg;
+      break;
+    case '?':
+      usage();
+      break;
+    }
+
+  }
+
+  return optind;
+}
+
+void
+sigwinch(int sig)
+{
+  int i;
+  (void)sig;
+
+  fflush(l.f_out);
+  fprintf(l.f_out, "\n\nThis alpha version have resize disabled\n");
+  fflush(l.f_out);
+  fflush(f_result);
+  fclose(f_result);
+  exit(1);
+
+  ioctl(STDOUT_FILENO, TIOCGWINSZ, &winsz);
+  if (winsz.ws_row <= nb_items_per_page)
+    l.items_per_page = winsz.ws_row - 1;
+  else
+    l.items_per_page = nb_items_per_page;
+  l.col_width = winsz.ws_col;
+  calibre_width(&l);
+
+  for (i = 0 ; i != l.items_per_page; i++) {
+    if (l.nb_colsw[i] > l.col_width)
+      while(l.nb_colsw[i]-- > l.col_width) 
+	fprintf(l.f_out, "%s", dcstr);
+  }
+  draw_items(&l);
+  signal(SIGWINCH, sigwinch);
 }
 
 int
 main(int ac, char **av)
 {
   int c;
-  struct termios oldt, newt;
   int ch;
   int i;
   int count_items;
@@ -210,30 +301,15 @@ main(int ac, char **av)
 		    'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', 0};
   int shortcut_len = sizeof shortcut / sizeof(int);
   int l_num;
-  int nb_items_per_page = 10;
   int mode = 0;
 
   if (ac == 1)
     usage();
 
-  fd_result = STDERR_FILENO;
   init_locale();
-
-  l.f_out = stdout;
-  i = 1;
-  while (i < ac && av[i][0] == '-') {
-    if (av[i][1] == 'r') {
-	fd_result = atoi(av[i]+2);
-    }
-    else if (av[i][1] == 'o') {
-      l.f_out = fdopen(atoi(av[i]+2), "w");
-    }
-    else if (av[i][1] == 'l') {
-      nb_items_per_page = atoi(av[i]+2);
-    }
-    ++i;
-  }
-
+  f_result = stderr;
+  l.f_out = stdout;  
+  i = get_options(ac, av);
   items = av + i;
   count_items = ac - i;
   if (count_items == 0)
@@ -241,10 +317,6 @@ main(int ac, char **av)
 
   if (nb_items_per_page <= 0 || nb_items_per_page >= shortcut_len)
     return 1;
-  set_items_per_page(&l, nb_items_per_page);
-  set_items(&l, items, count_items);
-  set_items_per_page(&def, nb_items_per_page);
-  set_items(&def, items, count_items);
 
   tcgetattr( STDIN_FILENO, &oldt );
   newt = oldt;
@@ -252,72 +324,73 @@ main(int ac, char **av)
   tcsetattr( STDIN_FILENO, TCSANOW, &newt);
   terminit();
 
-  /* fd_in = STDIN_FILENO */
   l.prefix = shortcut;
   l.upstr = upstr;
+  l.dcstr = dcstr;
   l.bottom_msg[0] = '\0';
   l.bottom_msg_col_s = 0;
   l.y = 0;
   l.cursor_y = 0;
   l.item_top_page = 0;
+
+  set_items_per_page(&l, nb_items_per_page);
+  set_items(&l, items, count_items);
+  signal(SIGWINCH, sigwinch);
+  ioctl(STDOUT_FILENO, TIOCGWINSZ, &winsz);
+  l.col_width = winsz.ws_col;
+  calibre_width(&l);
   draw_items(&l);
+
   fflush(l.f_out);
-  while ((c = getchar()) != 'q')
-    {
-
-      if (c == '\n') {
-	enter_selected_items(&l);
-	break;
-      }
-      else if ((l_num = has_c(c, shortcut)) >= 0) {
-	  enter_result(l_num + l.item_top_page);
-	  break;
-	}
-      else
-	{
-	  switch (c)
-	    {
-	    case '/':
-	      tcsetattr( STDIN_FILENO, TCSANOW, &oldt);
-	      search();
-	      l.cur_page = 0;
-	      l.cursor_y = 0;
-	      draw_items(&l);
-	      tcsetattr( STDIN_FILENO, TCSANOW, &newt);
-	      break;
-	      
-	    case 'n' /*|| ' ' || 'j' */:
-	      page_seek(&l, RELATIVE, 1);
-	      break;
-	    case 'p' /*|| 'k'*/:
-	      page_seek(&l, RELATIVE, -1);
-	      break;
-	    case 'j':
-	      cursor_seek(&l, 1, 1);
-	      break;
-	    case 'k':
-	      cursor_seek(&l, 1, -1);
-	      break;
-	    case ' ':
-	      select_item(&l, l.cursor_y);
-	      cursor_seek(&l, RELATIVE, 1);
-	      /* draw_line(&l, l.cursor_y); */
-	      break;
-	    case 27: /*'ESCAPE'*/
-	      mode = !mode;
-	      set_bottom_msg(&l, "MODE:%d", mode);
-	    default:
-	      break;
-	    }
-	  fflush(l.f_out);
-	}
+  while ((c = getchar()) != 'q') {
+    if (c == -1) {
+      if (errno == EINTR)
+	continue;
+      exit(1);
     }
-  tcsetattr( STDIN_FILENO, TCSANOW, &oldt);
+    switch (c) {
+    case '/':
+      tcsetattr( STDIN_FILENO, TCSANOW, &oldt);
+      search();
+      l.cur_page = 0;
+      l.cursor_y = 0;
+      draw_items(&l);
+      tcsetattr( STDIN_FILENO, TCSANOW, &newt);
+      break;
+      
+    case 'n' /*|| ' ' || 'j' */:
+      page_seek(&l, RELATIVE, 1);
+      break;
+    case 'p' /*|| 'k'*/:
+      page_seek(&l, RELATIVE, -1);
+      break;
+    case 'j':
+      cursor_seek(&l, 1, 1);
+      break;
+    case 'k':
+      cursor_seek(&l, 1, -1);
+      break;
 
-  while (l.nb_items)
-    remove_item(&l, l.nb_items-1);
-  free(l.items);
-  free(l.nb_colsw);
-  _exit(0);
+    case ' ':
+      select_item(&l, l.cursor_y);
+      cursor_seek(&l, RELATIVE, 1);
+      break;
+
+    case '\n':
+      enter_selected_items();
+      cleanup_exit(0);
+      break;
+
+    default:
+      if ((l_num = has_c(c, shortcut)) >= 0) {
+	enter_result(l_num + l.item_top_page);
+	cleanup_exit(0);
+      }
+      break;
+    }
+    fflush(l.f_out);
+  }
+
+  cleanup_exit(0);
   return 0;
 }

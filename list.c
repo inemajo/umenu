@@ -1,29 +1,5 @@
 #include "umenu.h"
 
-/* size_t
-s_col_len(const char *s)
-{
-  size_t len;
-  wchar_t *ws;
-
-  ws = calloc(strlen(s), sizeof(wchar_t));
-  len = mbstowcs(ws, s, strlen(s));
-  len = wcswidth(ws, len);
-  free(ws);
-  return len;
-  \*  return mbstowcs(NULL, s, 0) + 1;*\
-}
-*/
-
-/* static size_t */
-/* wcnbcol(const char *ws) */
-/* { */
-/*   size_t len; */
-
-/*   len = wcswidth(ws, wcslen(ws)); */
-/*   return len; */
-/* } */
-
 void
 page_seek(list_t *l, int relative, int nb)
 {
@@ -81,7 +57,7 @@ cursor_seek(list_t *l, int relative, int nb)
     change_cursor_y(l, new_y);
 }
 
-static void
+void
 go_y(list_t *l, int ly)
 {
   while (l->y < ly) {
@@ -143,8 +119,9 @@ draw_bottom(list_t *l)
 void
 draw_line(list_t *l, int ly)
 {
-  item_t *item;
+  item_t *item = NULL;
   int nbw;
+  int i;
 
   go_y(l, ly);
   fprintf(l->f_out, "\r");
@@ -153,21 +130,27 @@ draw_line(list_t *l, int ly)
     {
       item = GET_ITEM(l, ly);
       if (item == GET_CUR_ITEM(l))
-	nbw += fprintf(l->f_out, "+");
+	nbw += fprintf(l->f_out, "+"); /*!!! penser à calibre width */
       else
-	nbw += fprintf(l->f_out, " ");
+	nbw += fprintf(l->f_out, " "); /* le jour où on modifie  */
       
       if (item->selected)
-	nbw += fprintf(l->f_out, "%c * ", l->prefix[ly]);
+	nbw += fprintf(l->f_out, "%c * ", l->prefix[ly]); /* ça aussi */
       else
 	nbw += fprintf(l->f_out, "%c - ", l->prefix[ly]);
-      
-      fprintf(l->f_out, "%s", item->s);
-      nbw += item->colsneed;
+
+      fprintf(l->f_out, "%.*s", item->s_len_used, item->s);
+      nbw += item->w_cols_used;
   }
-  if (nbw < l->nb_colsw[ly])
-    fprintf(l->f_out, "%0*c", l->nb_colsw[ly] - nbw, ' ');
+  if (nbw < l->nb_colsw[ly]) {
+    /* fprintf(l->f_out, "%0*c", l->nb_colsw[ly] - nbw, ' '); */
+    i = l->nb_colsw[ly] - nbw;
+    while (i--)
+      fprintf(l->f_out, "%s", l->dcstr);
+  }
   l->nb_colsw[ly] = nbw;
+
+  fprintf(l->f_out, "\n%s", l->upstr);
 }
 
 void
@@ -184,7 +167,8 @@ void
 select_item(list_t *l, int y)
 {
   if (l->item_top_page + y < l->nb_items)
-    l->items[l->item_top_page + y].selected = !l->items[l->item_top_page + y].selected;
+    l->items[l->item_top_page + y]->selected = 
+      !l->items[l->item_top_page + y]->selected;
 }
 
 void
@@ -216,30 +200,76 @@ set_items_per_page(list_t *l, size_t nb)
   /* Faire disparaitre les anciennes lignes  */
 }
 
-size_t
-add_item(list_t *l, char *s)
+static void
+calcul_item_width(list_t *l, item_t *item)
+{
+  int len;
+  int cols_width;
+  wchar_t *tmp;
+
+  len = item->w_len;
+  while ((cols_width = wcswidth(item->ws, len)) > l->col_width - l->pre_width)
+    --len;
+
+  item->w_len_used = len;
+  item->w_cols_used = cols_width;
+  tmp = item->ws;
+  item->s_len_used = wcsnrtombs(NULL, &tmp,
+				item->w_len_used, item->s_len, NULL);
+}
+
+void
+calibre_width(list_t *l)
+{
+  int i;
+  int biggest = 0;
+  int tmp = 0;
+
+  for (i = 0; i != l->items_per_page; i++) {
+    tmp = wcwidth(l->prefix[i]);
+    if (tmp > biggest)
+      biggest = tmp;
+  }
+  biggest += 4; /* !!! ok tant qu'on affiche en statique le + %s - %s */
+  
+  l->pre_width = biggest + 1;
+  for (i = 0; i != l->nb_items; i++)
+    calcul_item_width(l, l->items[i]);
+}
+
+item_t *
+create_item(list_t *l, const char *s)
 {
   wchar_t *ws;
-  size_t item_n;
   size_t len;  
+  item_t *item;
+
+  item = malloc(sizeof(item_t));
+
+  item->s_len = strlen(s);
+  item->s = strdup(s);
+  ws = calloc(item->s_len+1, MB_CUR_MAX); /* MB_CUR_MAX || sizeof(wchar_t) ? */
+  item->w_len = mbstowcs(ws, s, item->s_len);
+  item->ws = ws;
+
+  item->selected = 0;
+  calcul_item_width(l, item);
+
+  return item;
+}
+
+size_t
+add_item(list_t *l, item_t *item)
+{
+  int item_n;
 
   item_n = l->nb_items;
   if (l->alloc_items <= item_n) {
     l->alloc_items += l->items_per_page;
-    l->items = realloc(l->items, l->alloc_items * sizeof(item_t));
+    l->items = realloc(l->items, l->alloc_items * sizeof(item_t *));
   }
 
-  l->items[item_n].s = s;
-
-  ws = calloc(strlen(s)+1, sizeof(wchar_t));
-  len = mbstowcs(ws, s, strlen(s));
-  len = wcswidth(ws, len);
-  l->items[item_n].colsneed = len;
-  free(ws);
-
-  l->items[item_n].len = strlen(l->items[item_n].s);
-
-  l->items[item_n].selected = 0;
+  l->items[item_n] = item;
   ++l->nb_items;
   return item_n;
 }
@@ -250,16 +280,19 @@ remove_item(list_t *l, size_t item)
   if (item >= l->nb_items)
     return ;
 
+  free(l->items[item]->ws);
+  free(l->items[item]->s);
+  free(l->items[item]);
   while (item+1 < l->nb_items)
     {
-      memcpy(l->items + item, l->items + item + 1, sizeof(item_t));
+      memcpy(l->items + item, l->items + item + 1, sizeof(item_t *));
       ++item;
     }
     --l->nb_items;
 
     if (l->alloc_items - l->nb_items > l->items_per_page) {
       l->alloc_items -= l->items_per_page;
-      l->items = realloc(l->items, l->alloc_items * sizeof(item_t));
+      l->items = realloc(l->items, l->alloc_items * sizeof(item_t *));
     }
 }
 
@@ -270,18 +303,6 @@ clear_items(list_t *l)
     remove_item(l, 0);
 }
 
-
-size_t
-copy_items(list_t *dst, list_t *src)
-{
-  size_t i;
-
-  clear_items(dst);
-  for (i = 0; i < src->nb_items; i++) {
-    add_item(dst, src->items[i].s);
-  }
-}
-
 void
 set_items(list_t *l, char **items, size_t nb_items)
 {
@@ -289,5 +310,5 @@ set_items(list_t *l, char **items, size_t nb_items)
   
   clear_items(l);
   for (i = 0; i != nb_items; i++)
-    add_item(l, items[i]);
+    add_item(l, create_item(l, items[i]));
 }
